@@ -89,6 +89,7 @@ class MessageView:
         while True:
             message = input("")
             if message == "\quit":
+                self.client_controller.quit()
                 break
             else:
                 print(f"{client_controller.username}: {message}")
@@ -192,6 +193,16 @@ class ClientController:
             "username": self.username,
             "password": self.password,
             "message": message,
+        }
+        return self.request_helper.request(data)
+    
+    def quit(self):
+        data = {
+            "command": "message",
+            "username": self.username,
+            "password": self.password,
+            "message": "",
+            "quit": True
         }
         return self.request_helper.request(data)
 

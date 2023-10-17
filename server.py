@@ -88,15 +88,26 @@ class CredentialsRepository:
 
 
 class AuthManager:
-    def __init__(self, user_data):
+    def __init__(self, user_data, user_data_manager):
         self.credentials_repository = CredentialsRepository()
         self.user_data = user_data
+        self.user_data_manager = user_data_manager
 
     def login(self, username, password):
         user_exists = self.credentials_repository.user_exists(username, password)
-        if user_exists:
+        user_logged_in = self.user_data_manager.is_logged_in(username)
+
+        if user_logged_in:
+            return {"status": "failure", "message": "User is already logged in"}
+
+        can_log_in = user_exists and not user_logged_in
+
+        if can_log_in:
+            self.user_data.logged_in = True
             self.user_data.display_name = username
-        return user_exists
+            return {"status": "success"}
+
+        return {"status": "failure", "message": "Invalid credentials"}
 
     def register(self, username, password):
         return self.credentials_repository.create_user(username, password)
@@ -114,7 +125,7 @@ class Command:
         self.socket = socket
 
     def respond(self, data):
-        data['ID'] = self.data['ID']
+        data["ID"] = self.data["ID"]
         self.socket.sendall(json.dumps(data).encode("utf-8"))
 
     def execute(self):
@@ -128,17 +139,9 @@ class LoginCommand(Command):
         self.auth_manager = auth_manager
 
     def execute(self):
-        print("LOGGING IN")
-        login_successful = self.auth_manager.login(
-            self.data["username"], self.data["password"]
+        self.respond(
+            self.auth_manager.login(self.data["username"], self.data["password"])
         )
-
-        if login_successful:
-            self.respond({"status": "success"})
-        else:
-            self.respond(
-                {"status": "failure", "message": "Invalid username or password"}
-            )
 
 
 class RegisterCommand(Command):
@@ -148,7 +151,6 @@ class RegisterCommand(Command):
         self.auth_manager = auth_manager
 
     def execute(self):
-        print("REGISTERING")
         register_successful = self.auth_manager.register(
             self.data["username"], self.data["password"]
         )
@@ -235,10 +237,18 @@ class MessageCommand(AuthCommand):
         self.data = data
         self.user_data = user_data
 
-    def send_message(self, socket, message):
+    def relay_message(self, socket, message):
         message_contents = {
             "command": "message",
             "username": self.user_data.display_name,
+            "message": message,
+        }
+        socket.sendall(json.dumps(message_contents).encode("utf-8"))
+
+    def system_message(self, socket, message):
+        message_contents = {
+            "command": "message",
+            "username": "",
             "message": message,
         }
         socket.sendall(json.dumps(message_contents).encode("utf-8"))
@@ -250,18 +260,19 @@ class MessageCommand(AuthCommand):
             if self.data.get("quit", False):
                 self.user_data.partner = None
                 partner_data.partner = None
-                self.send_message(partner_data.socket, "LMAO THEY QUIT")
-                self.respond({"status": "success"})
+                self.system_message(partner_data.socket, "LMAO THEY QUIT")
+                self.respond({"status": "failure", "message": "no partner"})
             elif self.user_data.partner is None:
                 self.respond({"status": "failure", "message": "No partner"})
             else:
-                self.send_message(partner_data.socket, self.data["message"])
+                self.relay_message(partner_data.socket, self.data["message"])
                 self.respond({"status": "success"})
 
 
 class CommandFactory:
     @staticmethod
     def create_command(data, socket, user_data_manager, auth_manager, user_data):
+        print(data)
         command = data["command"]
 
         if command == "login":
@@ -277,7 +288,9 @@ class CommandFactory:
                 socket, data, auth_manager, user_data_manager, user_data
             )
         elif command == "message":
-            return MessageCommand(socket, data, auth_manager, user_data_manager, user_data)
+            return MessageCommand(
+                socket, data, auth_manager, user_data_manager, user_data
+            )
         else:
             return None
 
@@ -289,6 +302,7 @@ class UserData:
         self.target = None
         self.partner = None
         self.available = Event()
+        self.logged_in = True
 
 
 class UserDataManager:
@@ -303,6 +317,14 @@ class UserDataManager:
 
     def get_user(self, username):
         return next(user for user in self.user_data if user.display_name == username)
+
+    def delete_user(self, user_data):
+        self.user_data.remove(user_data)
+
+    def is_logged_in(self, username):
+        return any(
+            user.display_name == username and user.logged_in for user in self.user_data
+        )
 
 
 class Server:
@@ -319,9 +341,14 @@ class Server:
         self.connections = []
         self.user_data_manager = UserDataManager()
 
+    def close_client(self, client_socket, user_data, address):
+        client_socket.close()
+        print(f"Connection from {address} closed")
+        self.user_data_manager.delete_user(user_data)
+
     def handle_client(self, client_socket, address):
         user_data = UserData(client_socket)
-        auth_manager = AuthManager(user_data)
+        auth_manager = AuthManager(user_data, self.user_data_manager)
 
         self.user_data_manager.add_user_data(user_data)
 
@@ -329,18 +356,31 @@ class Server:
         # Handle client communication here
         # For example, you can use client_socket.recv() to receive data from the client
         # and client_socket.send() to send data to the client
-        while True:
-            data = json.loads(client_socket.recv(data_payload).decode())
-            if data["command"] == "close":
-                break
-            else:
-                command = CommandFactory.create_command(
-                    data, client_socket, self.user_data_manager, auth_manager, user_data
-                )
-                command.execute()
-
-        client_socket.close()
-        print(f"Connection from {address} closed")
+        try:
+            while True:
+                data = json.loads(client_socket.recv(data_payload).decode())
+                if data["command"] == "close":
+                    break
+                else:
+                    command = CommandFactory.create_command(
+                        data,
+                        client_socket,
+                        self.user_data_manager,
+                        auth_manager,
+                        user_data,
+                    )
+                    command.execute()
+        except json.JSONDecodeError:
+            print("Error: Invalid JSON data received from the client.")
+            self.close_client(client_socket, user_data, address)
+            # Handle the error or log it as needed
+        except KeyError as e:
+            print(f"Error: Missing key in received data - {e}")
+            self.close_client(client_socket, user_data, address)
+            # Handle the error or log it as needed
+        except Exception as e:
+            print(f"Error: An unexpected error occurred - {e}")
+            self.close_client(client_socket, user_data, address)
 
     def start(self):
         self.server_socket.listen(self.backlog)
