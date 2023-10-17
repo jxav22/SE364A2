@@ -219,12 +219,12 @@ class ConnectCommand(AuthCommand):
             target_data = self.user_data_manager.get_user(target)
 
             if target_data.target == self.user_data.display_name:
-                self.user_data.available.set()
+                self.respond({"status": "success", "username": self.user_data.display_name, "address": self.user_data.address, "port":self.user_data.port, "is_client": True})
                 self.user_data.partner = target
-                self.respond({"status": "success"})
+                self.user_data.available.set()
             elif target_data.available.wait(self.timeout):
                 self.user_data.partner = target
-                self.respond({"status": "success"})
+                self.respond({"status": "success", "username": self.user_data.display_name, "address":"", "port": target_data.port, "is_client": False})
             else:
                 self.respond({"status": "failure", "message": "User not available"})
             self.user_data.target = None
@@ -296,13 +296,15 @@ class CommandFactory:
 
 
 class UserData:
-    def __init__(self, socket):
+    def __init__(self, socket, address, port):
         self.socket = socket
         self.display_name = None
         self.target = None
         self.partner = None
         self.available = Event()
         self.logged_in = True
+        self.address = address
+        self.port = port
 
 
 class UserDataManager:
@@ -336,7 +338,6 @@ class Server:
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((self.host, self.port))
 
         self.connections = []
         self.user_data_manager = UserDataManager()
@@ -347,7 +348,7 @@ class Server:
         self.user_data_manager.delete_user(user_data)
 
     def handle_client(self, client_socket, address):
-        user_data = UserData(client_socket)
+        user_data = UserData(client_socket, address[0], address[1])
         auth_manager = AuthManager(user_data, self.user_data_manager)
 
         self.user_data_manager.add_user_data(user_data)
@@ -383,6 +384,7 @@ class Server:
             self.close_client(client_socket, user_data, address)
 
     def start(self):
+        self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(self.backlog)
         print(f"Server listening on {self.host}:{self.port}...")
 
