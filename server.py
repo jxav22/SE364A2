@@ -1,5 +1,6 @@
 import socket
 import threading
+from threading import Event
 import sys
 import argparse
 import json
@@ -42,13 +43,13 @@ def dumb_chat_server(port):
     client.close()
 
 
-class UserData:
+class Credentials:
     def __init__(self, username, password):
         self.username = username
         self.password = password
 
 
-class UserDataRepository:
+class CredentialsRepository:
     file_path = "./user_data.pkl"
 
     def __init__(self):
@@ -71,43 +72,49 @@ class UserDataRepository:
 
     def create_user(self, username, password):
         if username not in self.users_data:
-            self.users_data[username] = UserData(username, password)
+            self.users_data[username] = Credentials(username, password)
             self.save_data()
             return True
         return False
 
-    def validate_user(self, username, password):
+    def user_exists(self, username, password):
         return any(
             user.username == username and user.password == password
             for user in self.users_data.values()
         )
 
+    def username_exists(self, username):
+        return any(user.username == username for user in self.users_data.values())
+
 
 class AuthManager:
-    def __init__(self, current_user_data):
-        self.user_data_repository = UserDataRepository()
-        self.user_data = current_user_data
+    def __init__(self, user_data):
+        self.credentials_repository = CredentialsRepository()
+        self.user_data = user_data
 
     def login(self, username, password):
-        response = self.user_data_repository.validate_user(username, password)
-        if response:
-            user_data = self.current_user_data.get()
-            user_data.display_name = username
-            self.current_user_data.set(user_data)
-        return response
+        user_exists = self.credentials_repository.user_exists(username, password)
+        if user_exists:
+            self.user_data.display_name = username
+        return user_exists
 
     def register(self, username, password):
-        return self.user_data_repository.create_user(username, password)
+        return self.credentials_repository.create_user(username, password)
 
-    def check_auth(self, username, password):
-        return self.user_data_repository.validate_user(username, password)
+    def authorize(self, username, password):
+        return self.credentials_repository.user_exists(username, password)
+
+    def username_exists(self, username):
+        return self.credentials_repository.username_exists(username)
 
 
 class Command:
-    def __init__(self, socket):
+    def __init__(self, socket, data):
+        self.data = data
         self.socket = socket
 
     def respond(self, data):
+        data['ID'] = self.data['ID']
         self.socket.sendall(json.dumps(data).encode("utf-8"))
 
     def execute(self):
@@ -116,7 +123,7 @@ class Command:
 
 class LoginCommand(Command):
     def __init__(self, socket, data, auth_manager):
-        super().__init__(socket)
+        super().__init__(socket, data)
         self.data = data
         self.auth_manager = auth_manager
 
@@ -136,7 +143,7 @@ class LoginCommand(Command):
 
 class RegisterCommand(Command):
     def __init__(self, socket, data, auth_manager):
-        super().__init__(socket)
+        super().__init__(socket, data)
         self.data = data
         self.auth_manager = auth_manager
 
@@ -148,15 +155,17 @@ class RegisterCommand(Command):
 
         if register_successful:
             self.respond({"status": "success"})
+        elif self.auth_manager.username_exists(self.data["username"]):
+            self.respond({"status": "failure", "message": "Account already exists"})
         else:
             self.respond(
-                {"status": "failure", "message": "Invalid username or password"}
+                {"status": "failure", "message": "Something went wrong. Try again"}
             )
 
 
 class AuthCommand(Command):
     def __init__(self, socket, data, auth_manager):
-        super().__init__(socket)
+        super().__init__(socket, data)
         self.data = data
         self.auth_manager = auth_manager
 
@@ -164,52 +173,95 @@ class AuthCommand(Command):
         username = self.data["username"]
         password = self.data["password"]
 
-        if self.auth_manager.check_auth(username, password):
+        if self.auth_manager.authorize(username, password):
             return True
         else:
-            self.respond({"status": "failure", "message": "Not authorized"})
+            self.respond(
+                {"status": "failure", "message": "Error - authorization required"}
+            )
             return False
 
 
 class AdvertiseCommand(AuthCommand):
-    def __init__(self, socket, data, auth_manager, user_data, current_user_data):
+    def __init__(self, socket, data, auth_manager, user_data_manager, user_data):
         super().__init__(socket, data, auth_manager)
+        self.user_data_manager = user_data_manager
         self.user_data = user_data
-        self.current_user_data = current_user_data
 
     def execute(self):
         if super().execute():
-            user_data = self.current_user_data.get()
-            user_data.available = True
-            self.current_user_data.set(user_data)
-
-            users = self.user_data.get_users()
-            available_users = [user.display_name for user in users if user.available and user.display_name != user_data.display_name]
+            users = self.user_data_manager.get_users()
+            available_users = [
+                user.display_name
+                for user in users
+                if user.display_name != self.user_data.display_name
+            ]
 
             self.respond({"status": "success", "users": available_users})
 
+
 class ConnectCommand(AuthCommand):
-    def __init__(self, socket, data, auth_manager, user_data):
+    timeout = 60
+
+    def __init__(self, socket, data, auth_manager, user_data_manager, user_data):
         super().__init__(socket, data, auth_manager)
+        self.user_data_manager = user_data_manager
+        self.data = data
         self.user_data = user_data
-    
+
     def execute(self):
         if super().execute():
-            partner = self.data["target"]
+            target = self.data["target"]
+            self.user_data.target = target
 
-            current_user_data = self.user_data.get_current_user_data()
-            current_user_data.partner = partner
-            self.user_data.set_current_user_data(current_user_data)
+            target_data = self.user_data_manager.get_user(target)
 
-            partner_user_data = next(user for user in self.user_data.get_users() if user.display_name == partner)
-            partner_user_data.partner = current_user_data.display_name
-            self.user_data.set_data(partner_user_data)
+            if target_data.target == self.user_data.display_name:
+                self.user_data.available.set()
+                self.user_data.partner = target
+                self.respond({"status": "success"})
+            elif target_data.available.wait(self.timeout):
+                self.user_data.partner = target
+                self.respond({"status": "success"})
+            else:
+                self.respond({"status": "failure", "message": "User not available"})
+            self.user_data.target = None
 
-            self.respond({"status": "success"})
+
+class MessageCommand(AuthCommand):
+    def __init__(self, socket, data, auth_manager, user_data_manager, user_data):
+        super().__init__(socket, data, auth_manager)
+        self.user_data_manager = user_data_manager
+        self.data = data
+        self.user_data = user_data
+
+    def send_message(self, socket, message):
+        message_contents = {
+            "command": "message",
+            "username": self.user_data.display_name,
+            "message": message,
+        }
+        socket.sendall(json.dumps(message_contents).encode("utf-8"))
+
+    def execute(self):
+        if super().execute():
+            partner_data = self.user_data_manager.get_user(self.user_data.partner)
+
+            if self.data.get("quit", False):
+                self.user_data.partner = None
+                partner_data.partner = None
+                self.send_message(partner_data.socket, "LMAO THEY QUIT")
+                self.respond({"status": "success"})
+            elif self.user_data.partner is None:
+                self.respond({"status": "failure", "message": "No partner"})
+            else:
+                self.send_message(partner_data.socket, self.data["message"])
+                self.respond({"status": "success"})
+
 
 class CommandFactory:
     @staticmethod
-    def create_command(data, socket, auth_manager, user_data, current_user_data):
+    def create_command(data, socket, user_data_manager, auth_manager, user_data):
         command = data["command"]
 
         if command == "login":
@@ -217,46 +269,40 @@ class CommandFactory:
         elif command == "register":
             return RegisterCommand(socket, data, auth_manager)
         elif command == "advertise":
-            return AdvertiseCommand(socket, data, auth_manager, user_data, current_user_data)
+            return AdvertiseCommand(
+                socket, data, auth_manager, user_data_manager, user_data
+            )
+        elif command == "connect":
+            return ConnectCommand(
+                socket, data, auth_manager, user_data_manager, user_data
+            )
+        elif command == "message":
+            return MessageCommand(socket, data, auth_manager, user_data_manager, user_data)
         else:
             return None
 
 
-class UserInfo:
-    data = {}
-
+class UserData:
     def __init__(self, socket):
-        self.data["socket"] = socket
-        self.data["display_name"] = None
-        self.data["partner"] = None
-        self.data["available"] = False
+        self.socket = socket
+        self.display_name = None
+        self.target = None
+        self.partner = None
+        self.available = Event()
 
 
-class UserInfoManager:
+class UserDataManager:
     def __init__(self):
-        self.user_data = {}
+        self.user_data = []
 
-    def get_data(self, id):
-        return self.user_data[id]
-
-    def set_data(self, id, data):
-        self.user_data[id] = data
+    def add_user_data(self, user_data):
+        self.user_data.append(user_data)
 
     def get_users(self):
-        return self.user_data.values()
-    
-class CurrentUserInfo(UserInfoManager):
-    def __init__(self):
-        super().__init__()
+        return self.user_data
 
-    def get_current_thread_id(self):
-        return threading.current_thread().ident
-    
-    def get(self):
-        return super().get_data(self.get_current_thread_id())
-    
-    def set(self, data):
-        super().set_data(self.get_current_thread_id(), data)
+    def get_user(self, username):
+        return next(user for user in self.user_data if user.display_name == username)
 
 
 class Server:
@@ -271,15 +317,15 @@ class Server:
         self.server_socket.bind((self.host, self.port))
 
         self.connections = []
-        self.user_data = UserInfoManager()
-        self.current_user_data = CurrentUserInfo()
-        self.auth_manager = AuthManager(self.user_data)
+        self.user_data_manager = UserDataManager()
 
     def handle_client(self, client_socket, address):
+        user_data = UserData(client_socket)
+        auth_manager = AuthManager(user_data)
+
+        self.user_data_manager.add_user_data(user_data)
+
         print(f"Accepted connection from {address}")
-
-        self.user_data.set_current_user_data(UserInfo(client_socket))
-
         # Handle client communication here
         # For example, you can use client_socket.recv() to receive data from the client
         # and client_socket.send() to send data to the client
@@ -289,7 +335,7 @@ class Server:
                 break
             else:
                 command = CommandFactory.create_command(
-                    data, client_socket, self.auth_manager, self.user_data, self.current_user_data
+                    data, client_socket, self.user_data_manager, auth_manager, user_data
                 )
                 command.execute()
 

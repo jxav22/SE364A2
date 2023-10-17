@@ -3,6 +3,7 @@ import socket
 import sys
 import argparse
 import json
+import threading
 
 
 class LoginView:
@@ -10,19 +11,15 @@ class LoginView:
         self.client_controller = client_controller
 
     def activate(self):
-        success = False
-        while not success:
-            username = input("username: ")
-            password = input("password: ")
+        username = input("username: ")
+        password = input("password: ")
 
-            response = client_controller.login(username, password)
+        response = client_controller.login(username, password)
 
-            if response["status"] == "success":
-                client_controller.record_logged_in_user(username, password)
-                success = True
-            else:
-                print("Invalid username or password")
-                break
+        if response["status"] == "success":
+            client_controller.record_logged_in_user(username, password)
+        elif response["status"] == "failure":
+            print(response["message"])
 
 
 class RegisterView:
@@ -30,19 +27,15 @@ class RegisterView:
         self.client_controller = client_controller
 
     def activate(self):
-        success = False
-        while not success:
-            username = input("username: ")
-            password = input("password: ")
+        username = input("username: ")
+        password = input("password: ")
 
-            response = client_controller.register(username, password)
+        response = client_controller.register(username, password)
 
-            if response["status"] == "success":
-                print("Successfully registered user")
-                success = True
-            else:
-                print("Failed to register user")
-                break
+        if response["status"] == "success":
+            print("Successfully registered user")
+        elif response["status"] == "failure":
+            print(response["message"])
 
 
 class ChatView:
@@ -56,18 +49,19 @@ class ChatView:
             options = ChatOptions(client_controller, response["users"])
 
             if len(options.get_options()) == 0:
-                print("No users to chat with\nTry Again?")
+                print("No users online\nTry Again?")
                 selected = int(input("[0] Yes\n[1] No\n>"))
                 if selected == 0:
                     self.activate()
             else:
                 while True:
+                    print("Select a user to chat with:")
                     for index, key in enumerate(options.get_options()):
                         print(f"[{index}] {key}")
                     selected = int(input(">"))
-                    self.options.select_option(selected)
-        else:
-            print("You cannot do this")
+                    options.select_option(selected)
+        elif response["status"] == "failure":
+            print(response["message"])
 
 
 class HomeView:
@@ -78,7 +72,7 @@ class HomeView:
     def activate(self):
         while True:
             if client_controller.is_logged_in:
-                print(f"Logged in as [{client_controller.username}]", end='\n\n')
+                print(f"Logged in as [{client_controller.username}]")
 
             print("Select an action:")
             for index, key in enumerate(self.options.get_options()):
@@ -91,9 +85,14 @@ class MessageView:
         self.client_controller = client_controller
     
     def activate(self):
+        print("Type \quit to exit")
         while True:
-            message = int(input(">"))
-            client_controller.send(message)
+            message = input("")
+            if message == "\quit":
+                break
+            else:
+                print(f"{client_controller.username}: {message}")
+                client_controller.send(message)
 
 class Options:
     def add_option(self, key, value):
@@ -140,7 +139,10 @@ class ChatOptions(Options):
 
         for user in self.users:
             def connect():
-                client_controller.connect(user)
+                response = client_controller.connect(user)
+                if response["status"] == "success":
+                    print(f"Connected to {user}")
+                    MessageView(self.client_controller).activate()
 
             self.add_option(user, connect)
 
@@ -152,7 +154,7 @@ class ClientController:
     is_logged_in = False
 
     def __init__(self, client):
-        self.client = client
+        self.request_helper = RequestHelper(client)
 
     def record_logged_in_user(self, username, password):
         self.username = username
@@ -161,11 +163,11 @@ class ClientController:
 
     def login(self, username, password):
         data = {"command": "login", "username": username, "password": password}
-        return self.client.send(data)
+        return self.request_helper.request(data)
 
     def register(self, username, password):
         data = {"command": "register", "username": username, "password": password}
-        return self.client.send(data)
+        return self.request_helper.request(data)
 
     def advertise(self):
         data = {
@@ -173,7 +175,7 @@ class ClientController:
             "username": self.username,
             "password": self.password,
         }
-        return self.client.send(data)
+        return self.request_helper.request(data)
 
     def connect(self, username):
         data = {
@@ -182,8 +184,54 @@ class ClientController:
             "password": self.password,
             "target": username,
         }
-        return self.client.send(data)
+        return self.request_helper.request(data)
+    
+    def send(self, message):
+        data = {
+            "command": "message",
+            "username": self.username,
+            "password": self.password,
+            "message": message,
+        }
+        return self.request_helper.request(data)
 
+class RequestHelper():
+    timeout = 60
+    id = 0
+
+    def __init__(self, client):
+        self.client = client
+        self.event_pool = {}
+
+        threading.Thread(target=self.listen).start()
+
+    def request(self, data):
+        self.id += 1
+        data["ID"] = self.id
+        self.client.send(data)
+
+        self.event_pool[self.id] = threading.Event()
+        flag = self.event_pool[self.id].wait(self.timeout)
+
+        if flag:
+            return self.event_pool[self.id]
+        else:
+            return {"status": "failure", "message": "Request timed out"}
+    
+    def listen(self):
+        while True:
+            response = self.client.receive()
+            if response.get("ID") in self.event_pool:
+                event = self.event_pool[response["ID"]]
+
+                self.event_pool[response["ID"]] = response
+
+                event.set()
+            elif response.get("command") == "message":
+                print(f"{response['username']}: {response['message']}")
+            else:
+                print(response)
+    
 
 class Client:
     buffer_size = 2048
@@ -209,12 +257,14 @@ class Client:
     def send(self, data):
         try:
             self.client_socket.sendall(self.process_before_sending(data))
-            response_data = self.client_socket.recv(self.buffer_size)
-            return self.process_received(response_data)
         except socket.error as e:
             print(f"Socket error: {str(e)}")
         except Exception as e:
             print(f"Other exception: {str(e)}")
+    
+    def receive(self):
+        response_data = self.client_socket.recv(self.buffer_size)
+        return self.process_received(response_data)
 
     def close(self):
         print("Closing connection to the server")
@@ -223,8 +273,9 @@ class Client:
 
 if __name__ == "__main__":
     client = Client("localhost", 20)
-    client_controller = ClientController(client)
     client.start()
+    
+    client_controller = ClientController(client)
 
     home_view = HomeView(client_controller)
     home_view.activate()
