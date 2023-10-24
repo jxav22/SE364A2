@@ -258,15 +258,14 @@ class MessageCommand(AuthCommand):
             partner_data = self.user_data_manager.get_user(self.user_data.partner)
 
             if self.data.get("quit", False):
+                self.respond({"status": "failure", "message": "no partner"})
                 self.user_data.partner = None
                 partner_data.partner = None
-                self.system_message(partner_data.socket, "LMAO THEY QUIT")
-                self.respond({"status": "failure", "message": "no partner"})
             elif self.user_data.partner is None:
                 self.respond({"status": "failure", "message": "No partner"})
             else:
-                self.relay_message(partner_data.socket, self.data["message"])
                 self.respond({"status": "success"})
+                self.relay_message(partner_data.socket, self.data["message"])
 
 
 class CommandFactory:

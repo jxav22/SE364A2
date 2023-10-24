@@ -88,16 +88,18 @@ class MessageView:
         self.view_manager = view_manager
     
     def activate(self):
-        print("Type quit to exit")
-        while self.view_manager.active:
+        print("Type nothing to exit")
+        while view_manager.active:
             message = input("")
-            if message == "quit":
+            if len(message) == 0:
                 self.client_controller.quit()
-                self.view_manager.restart()
-                break
+                view_manager.restart()
             else:
                 print(f"{client_controller.user_data.username}: {message}")
-                client_controller.send(message)
+                response = client_controller.send(message)
+                if response["status"] == "failure":
+                    view_manager.restart()
+
 
 class Options:
     def add_option(self, key, value):
@@ -144,13 +146,21 @@ class ChatOptions(Options):
     options = OrderedDict()
 
     def __init__(self, client_controller, view_manager, users):
-        self.client_controller = client_controller
-        self.view_manager = view_manager
-        self.users = users
+        for user in users:
+            def connect():
+                response = client_controller.connect(user)
+                if response["status"] == "success":
+                    print(f"Connected to {user}")
+                    MessageView(client_controller, view_manager).activate()
 
-        for user in self.users:
-            context_switcher = ContextSwitcher(client_controller, view_manager, user)
-            self.add_option(user, context_switcher.connect)
+            self.add_option(user, connect)
+        # self.client_controller = client_controller
+        # self.view_manager = view_manager
+        # self.users = users
+
+        # for user in self.users:
+        #     context_switcher = ContextSwitcher(client_controller, view_manager, user)
+        #     self.add_option(user, context_switcher.connect)
 
 class ContextSwitcher:
     def __init__(self, client_controller, view_manager, user):
@@ -285,6 +295,8 @@ class RequestHelper():
                 self.event_pool[response["ID"]] = response
 
                 event.set()
+            elif response.get("command") == "message":
+                print(f"{response['username']}: {response['message']}")
             else:
                 print(response)
 
@@ -327,12 +339,8 @@ class Client:
             print(f"Other exception: {str(e)}")
     
     def receive(self):
-        try:
-            response_data = self.client_socket.recv(self.buffer_size)
-            return self.process_received(response_data)
-        except Exception as e:
-            print(f"Other exception: {str(e)}")
-            return {"status": "failure", "message": "Error receiving data"}
+        response_data = self.client_socket.recv(self.buffer_size)
+        return self.process_received(response_data)
 
     def close(self):
         print("Closing connection to the server")
