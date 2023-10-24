@@ -5,6 +5,24 @@ import argparse
 import json
 import threading
 
+from cryptography.fernet import Fernet
+
+# Fixed key for encryption and decryption (example key)
+fixed_key = b'koI8rShEVjpTE94K02fghg2gFhctxTalSTmzOzgIB9Y='  # Replace this with your own secret key
+
+# Create a Fernet instance with the fixed key
+fernet = Fernet(fixed_key)
+
+# Function to encrypt a message
+def encrypt_message(message):
+    encrypted_message = fernet.encrypt(message.encode())
+    return encrypted_message
+
+# Function to decrypt an encrypted message
+def decrypt_message(encrypted_message):
+    decrypted_message = fernet.decrypt(encrypted_message).decode()
+    return decrypted_message
+
 from client_server import ContextSwitcher as ClientServerContextSwitcher
 
 class LoginView:
@@ -88,17 +106,12 @@ class MessageView:
         self.view_manager = view_manager
     
     def activate(self):
-        print("Type nothing to exit")
         while view_manager.active:
             message = input("")
-            if len(message) == 0:
-                self.client_controller.quit()
+            print(f"{client_controller.user_data.username}: {message}")
+            response = client_controller.send(message)
+            if response["status"] == "failure":
                 view_manager.restart()
-            else:
-                print(f"{client_controller.user_data.username}: {message}")
-                response = client_controller.send(message)
-                if response["status"] == "failure":
-                    view_manager.restart()
 
 
 class Options:
@@ -289,6 +302,10 @@ class RequestHelper():
     def listen(self):
         while not self.stop_event.is_set():
             response = self.client.receive()
+
+            if len(response) == 0:
+                break
+
             if response.get("ID") in self.event_pool:
                 event = self.event_pool[response["ID"]]
 
@@ -325,10 +342,10 @@ class Client:
         print(f"Client started on {self.host}:{self.port}...")
 
     def process_before_sending(self, data):
-        return json.dumps(data).encode("utf-8")
+        return encrypt_message(json.dumps(data))
 
     def process_received(self, data):
-        return json.loads(data.decode())
+        return json.loads(decrypt_message(data))
 
     def send(self, data):
         try:

@@ -7,40 +7,23 @@ import json
 import os
 import pickle
 
-host = "localhost"
-data_payload = 2048
-backlog = 1
+from cryptography.fernet import Fernet
 
+# Fixed key for encryption and decryption (example key)
+fixed_key = b'koI8rShEVjpTE94K02fghg2gFhctxTalSTmzOzgIB9Y='   # Replace this with your own secret key
 
-def dumb_chat_server(port):
-    """A dumb chat server"""
-    # Create a TCP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# Create a Fernet instance with the fixed key
+fernet = Fernet(fixed_key)
 
-    # Enable reuse address/port
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+# Function to encrypt a message
+def encrypt_message(message):
+    encrypted_message = fernet.encrypt(message.encode())
+    return encrypted_message
 
-    # Bind the socket to the port
-    print(f"Starting up chat server on {host} port {port}")
-    sock.bind((host, port))
-
-    # Listen to clients, backlog argument specifies the max no.of queued connections
-    sock.listen(backlog)
-
-    print("Waiting a client")
-    client, address = sock.accept()
-
-    while True:
-        print("Waiting a client's message")
-        data = client.recv(data_payload)
-        if data:
-            print(f"client> {json.loads(data.decode())}")
-
-        message = input("> ")
-        client.send(message.encode("utf-8"))
-
-    # end connection
-    client.close()
+# Function to decrypt an encrypted message
+def decrypt_message(encrypted_message):
+    decrypted_message = fernet.decrypt(encrypted_message).decode()
+    return decrypted_message
 
 
 class Credentials:
@@ -126,7 +109,7 @@ class Command:
 
     def respond(self, data):
         data["ID"] = self.data["ID"]
-        self.socket.sendall(json.dumps(data).encode("utf-8"))
+        self.socket.sendall(encrypt_message(json.dumps(data)))
 
     def execute(self):
         pass
@@ -243,7 +226,7 @@ class MessageCommand(AuthCommand):
             "username": self.user_data.display_name,
             "message": message,
         }
-        socket.sendall(json.dumps(message_contents).encode("utf-8"))
+        socket.sendall(encrypt_message(json.dumps(message_contents)))
 
     def system_message(self, socket, message):
         message_contents = {
@@ -251,7 +234,7 @@ class MessageCommand(AuthCommand):
             "username": "",
             "message": message,
         }
-        socket.sendall(json.dumps(message_contents).encode("utf-8"))
+        socket.sendall(encrypt_message(json.dumps(message_contents)))
 
     def execute(self):
         if super().execute():
@@ -358,7 +341,7 @@ class Server:
         # and client_socket.send() to send data to the client
         try:
             while True:
-                data = json.loads(client_socket.recv(data_payload).decode())
+                data = json.loads(decrypt_message(client_socket.recv(self.data_payload)))
                 if data["command"] == "close":
                     break
                 else:
